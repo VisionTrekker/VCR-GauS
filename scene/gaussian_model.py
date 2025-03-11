@@ -554,7 +554,7 @@ class GaussianModel:
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))    # 所有轴长都/1.6
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
@@ -568,10 +568,14 @@ class GaussianModel:
     
     def get_dir_max_scaling(self, scaling, rots):
         '''
-            rots: N, 3, 3
+            scaling: 要分裂的高斯的 缩放因子，(M,3)
+            rots: 要分裂的高斯的 旋转矩阵，(M,3,3)
         '''
-        axis = torch.argmax(scaling, dim=-1)
-        max_scaling = scaling[torch.arange(scaling.shape[0]), axis]
+        axis = torch.argmax(scaling, dim=-1)    # 最长轴的索引，(M,)
+        max_scaling = scaling[torch.arange(scaling.shape[0]), axis] # 要分裂高斯的最长轴长度，(M,)
+        # 最长轴在世界坐标系中对应的 旋转方向，(M,3)
+        # 先将axis扩展为(M,3,1)
+        # rots.gather(2, ...)：使用索引axis从旋转矩阵中提取相应的列
         dirs = rots.gather(2, axis[:, None, None].expand(-1, 3, -1)).squeeze(-1)
         
         return dirs, max_scaling, axis
@@ -597,28 +601,32 @@ class GaussianModel:
             
         scaling = self.get_scaling[selected_pts_mask]
         rots = build_rotation(self._rotation[selected_pts_mask])
+        # 获取要分裂的大高斯最长轴的 旋转方向、长度、轴索引
         dirs, max_scaling, axis = self.get_dir_max_scaling(scaling, rots)
-        radii = (n_std * max_scaling / 3.)[..., None] # 3 std
-        new_xyz1 = self.get_xyz[selected_pts_mask] + dirs * radii
+        # 新高斯的 位置：沿最长轴方向正、负偏移
+        radii = (n_std * max_scaling / 3.)[..., None]       # 偏移量：2/3最大半轴长
+        new_xyz1 = self.get_xyz[selected_pts_mask] + dirs * radii   # 沿最长轴方向正偏移
         new_xyz2 = self.get_xyz[selected_pts_mask] - dirs * radii
         new_xyz = torch.cat((new_xyz1, new_xyz2), dim=0)
-        
+        # 新高斯的 三个半轴长：只将最长轴长度 / 1.6
         new_scaling = scaling.detach().clone()
         new_scaling[torch.arange(new_scaling.shape[0]), axis] = max_scaling / (0.8*N)
         new_scaling = self.scaling_inverse_activation(new_scaling)
         new_scaling = torch.cat((new_scaling, new_scaling), dim=0)
-        
+
+        # 原高斯的 旋转、SH系数、不透明度
         new_rotation = self._rotation[selected_pts_mask]
         new_rotation = torch.cat((new_rotation, new_rotation), dim=0)
-        
+
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_dc = torch.cat((new_features_dc, new_features_dc), dim=0)
         new_features_rest = self._features_rest[selected_pts_mask]
         new_features_rest = torch.cat((new_features_rest, new_features_rest), dim=0)
-        
+
         new_opacity = self._opacity[selected_pts_mask]
         new_opacity = torch.cat((new_opacity, new_opacity), dim=0)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+
         new_objects_dc = self._objects_dc[selected_pts_mask].repeat(N,1,1) if self.enable_semantic else None
         
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_objects_dc)
